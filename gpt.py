@@ -34,6 +34,12 @@ class GPT_Transformer(nn.Module):
         self.model_dim = model_dim
         self.vocab_size = vocab_size
         self.embeddings = Embedding(vocab_size, model_dim)
+        self.mha = torch.nn.MultiheadAttention(model_dim, 4)
+        self.linear1 = torch.nn.Linear(model_dim, model_dim * 4)
+        self.linear2 = torch.nn.Linear(model_dim * 4, model_dim)
+        self.relu = torch.nn.ReLU()
+        self.norm1 = nn.LayerNorm(model_dim)
+        self.norm2 = nn.LayerNorm(model_dim)
 
     def forward(self, x):
         print(f"Input string: {x}")
@@ -44,8 +50,14 @@ class GPT_Transformer(nn.Module):
         print(f"Embeddings shape {embed.shape}")
         positional_encoding_embeddings = self.pos_encod(embed)
         print(f"Positional Encoding Embeddings shape is {positional_encoding_embeddings.shape}")
-        
-        return positional_encoding_embeddings
+        attn_output, attn_weights  = self.mha(positional_encoding_embeddings,positional_encoding_embeddings,positional_encoding_embeddings)
+        print(f"Self attention block shape {attn_output.shape}")
+        x = self.norm1(embed + attn_output)
+        ff = self.linear2(self.relu(self.linear1(x)))
+        print(f"shape after ffn {ff.shape}")
+        # Residual + Norm
+        x = self.norm2(x + ff)
+        return x
 
 pos_encod = PositionalEncoding(d_model=64, max_len=100)
 model = GPT_Transformer(model_dim=64, vocab_size=vocabulary_size)
