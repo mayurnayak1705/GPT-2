@@ -69,39 +69,143 @@ class MHA(nn.Module):
         self.w_q = torch.nn.Parameter(torch.rand(d_in, d_q))
         self.w_k = torch.nn.Parameter(torch.rand(d_in, d_q))
         self.w_v = torch.nn.Parameter(torch.rand(d_in, d_v))
-        self.W_o = torch.nn.Parameter(torch.rand(d_in, d_v))
+        self.W_o = torch.nn.Parameter(torch.rand(d_v, d_in))
 
     def forward(self, x):
-        batch = x.shape[0]
-        seq_len = x.shape[1]
-        print(seq_len)
+        B, T, _ = x.shape
+
         q = x @ self.w_q
         k = x @ self.w_k
         v = x @ self.w_v
-        print(x.shape)
-        print(self.w_k.shape)
-        print(k.shape)
 
+        d_head_q = self.d_q // self.heads
+        d_head_v = self.d_v // self.heads
 
-        Q = q.view(batch,seq_len, self.heads, self.d_q//self.heads).transpose(1,2)
-        K = k.view(batch,seq_len, self.heads, self.d_q//self.heads).transpose(1,2)
-        V = v.view(batch,seq_len, self.heads, self.d_v//self.heads).transpose(1,2)
-        print(K.shape)
-        attention_score = Q @ K.transpose(-2,-1)
-        print(attention_score.shape)
-        scaled_attention = f.softmax(attention_score / self.d_q ** 0.5 , dim=0)
-        values = scaled_attention @ V
-        print(values.shape)
-        values = values.transpose(1,2).contiguous()
-        print(values.shape)
-        values = values.view(batch, seq_len, self.d_v)
-        print(values.shape)
-        out = values @ self.W_o
-        print(out.shape)
+        Q = q.view(B, T, self.heads, d_head_q).transpose(1, 2)  # (B, H, T, d_head_q)
+        K = k.view(B, T, self.heads, d_head_q).transpose(1, 2)  # (B, H, T, d_head_q)
+        V = v.view(B, T, self.heads, d_head_v).transpose(1, 2)  # (B, H, T, d_head_v)
+
+        scores = Q @ K.transpose(-2, -1)                        # (B, H, T, T)
+        scores = scores / (d_head_q ** 0.5)                     
+        attn = f.softmax(scores, dim=-1)                       
+
+        values = attn @ V                                      
+        values = values.transpose(1, 2).contiguous()           
+        values = values.view(B, T, self.d_v)                   
+
+        out = values @ self.W_o                                
+        return out
 
     
-# 
-model = MHA(8,8,8,2)
-model(embedded_sentence.unsqueeze(0))
+
+# model = MHA(8,8,8,2)
+# model(embedded_sentence.unsqueeze(0))
 
 
+
+class MHA_KV_CACHE(nn.Module):
+    def __init__(self, d_in, d_q, d_v, d_heads):
+        super().__init__()
+        self.d_q = d_q
+        self.d_v = d_v
+        self.heads = d_heads
+
+        self.w_q = nn.Parameter(torch.rand(d_in, d_q))
+        self.w_k = nn.Parameter(torch.rand(d_in, d_q))
+        self.w_v = nn.Parameter(torch.rand(d_in, d_v))
+        self.W_o = nn.Parameter(torch.rand(d_v, d_in))
+
+    def forward(self, x, kv_full=None):
+        B, T, _ = x.shape
+
+        q = x @ self.w_q
+        k = x @ self.w_k
+        v = x @ self.w_v
+
+        # split into heads
+        d_head_q = self.d_q // self.heads
+        d_head_v = self.d_v // self.heads
+
+        Q = q.view(B, T, self.heads, d_head_q).transpose(1, 2)
+        K = k.view(B, T, self.heads, d_head_q).transpose(1, 2)
+        V = v.view(B, T, self.heads, d_head_v).transpose(1, 2)
+
+        # KV cache
+        if kv_full is not None:
+            past_K, past_V = kv_full
+            K = torch.cat((past_K, K), dim=-2)
+            V = torch.cat((past_V, V), dim=-2)
+
+        present_kv = (K, V)
+
+        # attention
+        scores = Q @ K.transpose(-2, -1)
+        scores = scores / (d_head_q ** 0.5)
+        attn = f.softmax(scores, dim=-1)
+
+        values = attn @ V
+
+        # merge heads
+        values = values.transpose(1, 2).contiguous()
+        values = values.view(B, T, self.d_v)
+
+        out = values @ self.W_o
+
+        return out, present_kv
+
+
+
+
+
+import torch
+import time
+
+def benchmark_mha(mha, mha_kv, seq_len=128, d_in=64, device="cpu"):
+    mha = mha
+    mha_kv = mha_kv
+
+    x_full = torch.randn(1, seq_len, d_in)
+
+    print(f"\nSequence Length: {seq_len}")
+
+    # ---------------------------
+    # 1. Full MHA (no KV cache)
+    # ---------------------------
+    start = time.time()
+
+    for t in range(1, seq_len + 1):
+        x = x_full[:, :t, :]          
+        _ = mha(x)
+
+    full_time = time.time() - start
+    print(f"Full MHA Time: {full_time:.6f} sec")
+
+    # ---------------------------
+    # 2. KV Cache MHA
+    # ---------------------------
+    start = time.time()
+
+    kv_cache = None
+    for t in range(seq_len):
+        x = x_full[:, t:t+1, :]       # one token at a time
+        _, kv_cache = mha_kv(x, kv_cache)
+
+    kv_time = time.time() - start
+    print(f"KV Cache Time: {kv_time:.6f} sec")
+
+    # ---------------------------
+    # Speedup
+    # ---------------------------
+    print(f"Speedup: {full_time / kv_time:.2f}x")
+
+
+
+d_in = 1280
+d_q = 1280
+d_v = 1280
+heads = 20
+
+mha = MHA(d_in, d_q, d_v, heads)
+mha_kv = MHA_KV_CACHE(d_in, d_q, d_v, heads)
+
+benchmark_mha(mha, mha_kv, seq_len=128, d_in=d_in)
